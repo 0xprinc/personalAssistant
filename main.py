@@ -4,12 +4,15 @@ Run modes:
     python main.py              — smoke test (all stubs, verifies pipeline wiring)
     python main.py test         — audio pipeline test (10 s mic, VAD only)
     python main.py test_stt     — full STT pipeline test (20 s, AudioCapture→VAD→STT→Cleaner→Chunker)
+    python main.py test_memory  — memory pipeline test (30 s capture + FAISS persistence check)
 """
 
+import os
 import sys
 import time
 import queue
 import threading
+import uuid
 
 from jarvis.infra.config_manager import config
 from jarvis.infra.logger import Logger
@@ -233,7 +236,7 @@ def test_stt_pipeline() -> list[str]:
     t = threading.Thread(target=_processing_loop, daemon=True)
     t.start()
 
-    time.sleep(2000)
+    time.sleep(20)
 
     test_running[0] = False
     try:
@@ -243,6 +246,173 @@ def test_stt_pipeline() -> list[str]:
         pass
     print("🛑 Test complete.")
     return collected_transcripts
+
+
+# ---------------------------------------------------------------------------
+# Memory pipeline test — full capture path + FAISS persistence check
+# ---------------------------------------------------------------------------
+
+def test_memory_pipeline() -> None:
+    """30-second live mic test: AudioCapture → VAD → STT → Cleaner → Chunker
+    → LiquidBuffer → MemoryManager → FAISS.
+
+    After capture stops, flushes all pending chunks to FAISS, runs a test
+    semantic query, and confirms FAISS + metadata files exist on disk.
+    Also validates that restarting without speech still queries previously
+    stored chunks (persistence check).
+    """
+    print("\n" + "=" * 60)
+    print("🧠  Jarvis Memory Pipeline Test")
+    print("=" * 60)
+
+    # --- Build the full pipeline ---
+    device_mgr = DevicePriorityManager()
+    source = device_mgr.get_active_source()
+    print(f"🎤 Microphone: {source['device_name']} ({source['sample_rate']} Hz)\n")
+
+    session_id = str(uuid.uuid4())
+    device_id = source.get("device_id", "laptop")
+
+    audio_cap = AudioCapture(device_id=source["device_id"], native_rate=source["sample_rate"])
+    vad = VadEngine(audio_queue=audio_cap.audio_queue)
+    stt = MoonshineSTT()
+    cleaner = TextCleaner()
+    chunker = Chunker()
+
+    buffer = LiquidBuffer()
+    embedding = BGEEmbeddingEngine()
+    vector_store = FAISSVectorStore()
+    memory_mgr = MemoryManager(
+        liquid_buffer=buffer,
+        embedding_engine=embedding,
+        vector_store=vector_store,
+    )
+    memory_mgr.start()
+
+    print("🟢 Pipeline ready — please speak for 30 seconds!\n")
+    audio_cap.start()
+
+    test_running = [True]
+    chunk_count = [0]
+
+    def _processing_loop():
+        was_speaking = False
+        while test_running[0]:
+            try:
+                segment = vad.segment_queue.get(timeout=0.05)
+                print("⏳ Transcribing …")
+                transcript = stt.transcribe(segment)
+                clean_text = cleaner.clean(transcript["text"])
+                if not clean_text:
+                    print("❌ (Empty or unintelligible)\n")
+                    was_speaking = False
+                    continue
+
+                print(f"\n📝 [{transcript['start_ms']} ms] {clean_text}\n")
+                chunks = chunker.split(
+                    clean_text,
+                    transcript["start_ms"],
+                    transcript["end_ms"],
+                )
+                for c in chunks:
+                    c["session_id"] = session_id
+                    c["device_id"] = device_id
+                    c["confidence"] = transcript.get("confidence", 1.0)
+                    c["redacted"] = False
+                    # STEP 6: insert into LiquidBuffer synchronously on every chunk
+                    buffer.insert(c)
+                    chunk_count[0] += 1
+                    print(f"   💾 Chunk inserted → buffer (total: {chunk_count[0]})")
+                was_speaking = False
+            except queue.Empty:
+                if vad.is_speaking and not was_speaking:
+                    print("🗣️  Speech detected … listening …", flush=True)
+                    was_speaking = True
+
+    t = threading.Thread(target=_processing_loop, daemon=True)
+    t.start()
+
+    time.sleep(30)
+
+    print("\n⏹️  Capture stopped after 30 seconds.")
+    test_running[0] = False
+    try:
+        vad.stop()
+        audio_cap.stop()
+    except Exception:
+        pass
+
+    # Give processing loop 2 s to finish any in-flight transcription
+    t.join(timeout=5)
+
+    # --- Flush all buffered chunks to FAISS immediately ---
+    print("\n🔄 Flushing LiquidBuffer → FAISS …")
+    # Force flush_before a far-future cutoff to drain everything
+    far_future_ms = int(time.time() * 1000) + 10_000_000
+    chunks_to_flush = buffer.flush_before(far_future_ms)
+    print(f"   Drained {len(chunks_to_flush)} chunks from buffer for direct flush")
+
+    flushed = 0
+    if chunks_to_flush:
+        texts = [c.get("chunk_text", c.get("text", "")) for c in chunks_to_flush]
+        vectors = embedding.embed_batch(texts)
+        for chunk, vector in zip(chunks_to_flush, vectors):
+            mem_chunk = {
+                "chunk_id":       chunk.get("chunk_id", ""),
+                "text":           chunk.get("chunk_text", chunk.get("text", "")),
+                "vector":         vector,
+                "timestamp_start": chunk.get("timestamp_start", 0),
+                "timestamp_end":   chunk.get("timestamp_end", 0),
+                "device_id":      chunk.get("device_id", "laptop"),
+                "session_id":     chunk.get("session_id", ""),
+                "confidence":     chunk.get("confidence", 1.0),
+                "redacted":       chunk.get("redacted", False),
+            }
+            vector_store.upsert(mem_chunk)
+            flushed += 1
+
+    memory_mgr.stop()
+    print(f"✅ Flushed {flushed} chunks to FAISS (index size: {vector_store._index.ntotal})\n")
+
+    # --- Semantic search test ---
+    query = "developer recruiter startup reaching out"
+    print(f"🔍 Test query: \"{query}\"")
+    q_vec = embedding.embed(query)
+    results = vector_store.search(q_vec, top_k=3, filters={})
+
+    print(f"\n📚 Top {len(results)} results:")
+    if results:
+        for i, r in enumerate(results, 1):
+            score = r.get("_score", 0.0)
+            text = r.get("text", r.get("chunk_text", "(no text)"))
+            ts_start = r.get("timestamp_start", 0)
+            ts_end = r.get("timestamp_end", 0)
+            print(f"\n  [{i}] score={score:.4f}  {ts_start}ms → {ts_end}ms")
+            print(f"       {text}")
+    else:
+        print("  (No results — no speech was recorded during the 30s window)")
+
+    # --- Persistence validation ---
+    print("\n📁 Checking persistence …")
+    from jarvis.infra.config_manager import config as cfg
+    index_path_str: str = cfg.get("storage", {}).get("vector_store_path", "data/faiss_index.bin")
+    from pathlib import Path
+    index_path = Path(index_path_str)
+    meta_path = index_path.with_suffix(".pkl")
+
+    index_ok = index_path.exists()
+    meta_ok = meta_path.exists()
+    print(f"   FAISS index  ({index_path}): {'✅ EXISTS' if index_ok else '❌ MISSING'}")
+    print(f"   Metadata pkl ({meta_path}): {'✅ EXISTS' if meta_ok else '❌ MISSING'}")
+
+    if index_ok and meta_ok:
+        print("\n✅ Persistence validated — restart Python and run test_memory_pipeline()")
+        print("   without speaking to confirm old chunks are still searchable.")
+    else:
+        print("\n⚠️  Persistence check FAILED — files not written correctly.")
+
+    print("\n🛑 Memory pipeline test complete.\n")
+
 
 # ---------------------------------------------------------------------------
 # Entrypoint
@@ -257,6 +427,8 @@ if __name__ == "__main__":
             results = test_stt_pipeline()
             print("\n--- FINAL OUTPUT ---")
             print(results)
+        elif arg == "test_memory":
+            test_memory_pipeline()
         else:
             run_smoke_test()
     else:

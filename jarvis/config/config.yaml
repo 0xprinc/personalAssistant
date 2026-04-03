@@ -9,6 +9,7 @@ models:
 parameters:
   chunk_size_words: 50                        # Approximate target number of words per memory chunk
   liquid_buffer_duration_minutes: 10          # Minutes of recent audio to keep in RAM buffer
+  memory_flush_interval_seconds: 60           # How often MemoryManager flushes LiquidBuffer → FAISS
   vad_threshold: 0.5                          # Float 0-1: minimum VAD confidence to classify a block as speech
   silence_tolerance_ms: 1200                  # ms of silence before closing a speech segment (1.2s matches production)
   prebuffer_ms: 500                           # ms of audio kept before speech onset (captures first consonant)
