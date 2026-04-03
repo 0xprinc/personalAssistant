@@ -5,9 +5,9 @@ Run modes:
     python main.py test         — audio pipeline test (10 s mic, VAD only)
     python main.py test_stt     — full STT pipeline test (20 s, AudioCapture→VAD→STT→Cleaner→Chunker)
     python main.py test_memory  — memory pipeline test (30 s capture + FAISS persistence check)
+    python main.py test_query   — query pipeline test (uses existing FAISS index, no capture needed)
 """
 
-import os
 import sys
 import time
 import queue
@@ -38,9 +38,9 @@ from jarvis.modules.memory.memory_manager import MemoryManager
 from jarvis.modules.query.query_parser import QueryParser
 from jarvis.modules.query.retriever import Retriever
 from jarvis.modules.query.context_builder import ContextBuilder
-from jarvis.modules.query.llm_claude import ClaudeLLM
+import jarvis.modules.query.llm_engine as llm_engine  # router — single entry point
 
-# Layer 5 — Output
+# Layer 5 — Output (stubs for now)
 from jarvis.modules.output.tts_kokoro import KokoroTTS
 from jarvis.modules.output.response_player import ResponsePlayer
 from jarvis.modules.output.ui import UILayer
@@ -51,35 +51,25 @@ from jarvis.modules.output.ui import UILayer
 # ---------------------------------------------------------------------------
 
 def run_smoke_test() -> None:
-    """Wire every module end-to-end using lightweight stubs to verify no import/API errors.
-
-    This test does NOT load any ML models or open any audio streams.
-    It proves the pipeline is correctly wired before any real hardware is used.
-    """
+    """Wire every module end-to-end using lightweight stubs to verify no import/API errors."""
     Logger.log("INFO", "main", "Starting Jarvis smoke test")
 
-    # Infrastructure
     device_mgr = DevicePriorityManager()
     privacy = PrivacyController()
 
-    # Layer 1 — use stub methods only (no real audio or VAD thread)
     audio_cap = AudioCapture()
     cleaner = TextCleaner()
     chunker = Chunker()
 
-    # Layer 3 — memory (stubs)
     embedding = BGEEmbeddingEngine()
     buffer = LiquidBuffer()
     vector_store = FAISSVectorStore()
     memory_mgr = MemoryManager()
 
-    # Layer 4 — query (stubs)
     parser = QueryParser()
     retriever = Retriever()
     ctx_builder = ContextBuilder()
-    llm = ClaudeLLM()
 
-    # Layer 5 — output (stubs)
     tts = KokoroTTS()
     player = ResponsePlayer()
     ui = UILayer()
@@ -87,14 +77,12 @@ def run_smoke_test() -> None:
     Logger.log("INFO", "main", "=== Starting Capture Path ===")
     device_id = device_mgr.get_active_source_id()
 
-    # Dummy STT result — skip model load entirely in smoke test
     dummy_text = "This is a smoke test. The pipeline is fully wired."
     dummy_start_ms = int(time.time() * 1000)
     dummy_end_ms = dummy_start_ms + 3000
     stt_res = {"text": dummy_text, "start_ms": dummy_start_ms, "end_ms": dummy_end_ms, "confidence": 1.0}
     Logger.log("INFO", "main", "[stt_moonshine] stub bypass in smoke test")
 
-    # Text cleaning + chunking
     clean_txt = cleaner.clean(stt_res["text"])
     chunks = chunker.split(
         clean_txt or "smoke test fallback.",
@@ -117,7 +105,6 @@ def run_smoke_test() -> None:
             "confidence": stt_res["confidence"],
             "redacted": False,
         }
-
         mem_chunk = privacy.apply(mem_chunk)
         vector_store.upsert(mem_chunk)
 
@@ -127,10 +114,9 @@ def run_smoke_test() -> None:
     query_text = "What was I talking about?"
     ui.update("query_received", {"query": query_text})
     parsed_query = parser.parse(query_text)
-    q_vec = embedding.embed(str(parsed_query))
-    ranked = retriever.retrieve(q_vec, {})
+    ranked = retriever.retrieve(query_text, parsed_query["time_filter"] or {})
     prompt = ctx_builder.build(ranked, query_text)
-    llm_res = llm.generate(prompt)
+    llm_res = llm_engine.generate(prompt)
     ui.update("answer_generated", {"answer": llm_res["answer"]})
     audio_ans = tts.synthesise(llm_res["answer"])
     player.play(audio_ans)
@@ -144,7 +130,6 @@ def run_smoke_test() -> None:
 
 def test_audio_pipeline() -> None:
     """10-second live mic test: Clean VAD output."""
-    # Suppress JSON logs for this clean test
     Logger.log = lambda *args, **kwargs: None
 
     device_mgr = DevicePriorityManager()
@@ -163,14 +148,12 @@ def test_audio_pipeline() -> None:
         was_speaking = False
         while test_running[0]:
             try:
-                # Segment was emitted (speech ended)
                 seg = vad.segment_queue.get(timeout=0.05)
                 n_samples = len(seg["pcm_data"]) / 2
                 duration_ms = n_samples / 16000 * 1000
                 print(f"⏹️  [VAD] Speech ended! Captured {duration_ms:.0f}ms of audio.\n")
                 was_speaking = False
             except queue.Empty:
-                # Poll is_speaking state to show when speech starts
                 if vad.is_speaking and not was_speaking:
                     print("🗣️  [VAD] Detecting speech... listening...", flush=True)
                     was_speaking = True
@@ -191,11 +174,7 @@ def test_audio_pipeline() -> None:
 # ---------------------------------------------------------------------------
 
 def test_stt_pipeline() -> list[str]:
-    """20-second live mic test: Clean STT transcription output.
-    Returns:
-        List of all clean transcribed strings detected during the 20 seconds.
-    """
-    # Suppress JSON logs for this clean test
+    """20-second live mic test: Clean STT transcription output."""
     Logger.log = lambda *args, **kwargs: None
 
     device_mgr = DevicePriorityManager()
@@ -218,7 +197,6 @@ def test_stt_pipeline() -> list[str]:
         while test_running[0]:
             try:
                 segment = vad.segment_queue.get(timeout=0.05)
-                # Segment obtained, speech ended
                 print("⏳ Transcribing...")
                 transcript = stt.transcribe(segment)
                 clean_text = cleaner.clean(transcript["text"])
@@ -253,19 +231,11 @@ def test_stt_pipeline() -> list[str]:
 # ---------------------------------------------------------------------------
 
 def test_memory_pipeline() -> None:
-    """30-second live mic test: AudioCapture → VAD → STT → Cleaner → Chunker
-    → LiquidBuffer → MemoryManager → FAISS.
-
-    After capture stops, flushes all pending chunks to FAISS, runs a test
-    semantic query, and confirms FAISS + metadata files exist on disk.
-    Also validates that restarting without speech still queries previously
-    stored chunks (persistence check).
-    """
+    """30-second live mic test: full capture → LiquidBuffer → FAISS."""
     print("\n" + "=" * 60)
     print("🧠  Jarvis Memory Pipeline Test")
     print("=" * 60)
 
-    # --- Build the full pipeline ---
     device_mgr = DevicePriorityManager()
     source = device_mgr.get_active_source()
     print(f"🎤 Microphone: {source['device_name']} ({source['sample_rate']} Hz)\n")
@@ -307,19 +277,13 @@ def test_memory_pipeline() -> None:
                     print("❌ (Empty or unintelligible)\n")
                     was_speaking = False
                     continue
-
                 print(f"\n📝 [{transcript['start_ms']} ms] {clean_text}\n")
-                chunks = chunker.split(
-                    clean_text,
-                    transcript["start_ms"],
-                    transcript["end_ms"],
-                )
+                chunks = chunker.split(clean_text, transcript["start_ms"], transcript["end_ms"])
                 for c in chunks:
                     c["session_id"] = session_id
                     c["device_id"] = device_id
                     c["confidence"] = transcript.get("confidence", 1.0)
                     c["redacted"] = False
-                    # STEP 6: insert into LiquidBuffer synchronously on every chunk
                     buffer.insert(c)
                     chunk_count[0] += 1
                     print(f"   💾 Chunk inserted → buffer (total: {chunk_count[0]})")
@@ -341,13 +305,9 @@ def test_memory_pipeline() -> None:
         audio_cap.stop()
     except Exception:
         pass
-
-    # Give processing loop 2 s to finish any in-flight transcription
     t.join(timeout=5)
 
-    # --- Flush all buffered chunks to FAISS immediately ---
     print("\n🔄 Flushing LiquidBuffer → FAISS …")
-    # Force flush_before a far-future cutoff to drain everything
     far_future_ms = int(time.time() * 1000) + 10_000_000
     chunks_to_flush = buffer.flush_before(far_future_ms)
     print(f"   Drained {len(chunks_to_flush)} chunks from buffer for direct flush")
@@ -374,44 +334,105 @@ def test_memory_pipeline() -> None:
     memory_mgr.stop()
     print(f"✅ Flushed {flushed} chunks to FAISS (index size: {vector_store._index.ntotal})\n")
 
-    # --- Semantic search test ---
     query = "developer recruiter startup reaching out"
     print(f"🔍 Test query: \"{query}\"")
     q_vec = embedding.embed(query)
     results = vector_store.search(q_vec, top_k=3, filters={})
 
     print(f"\n📚 Top {len(results)} results:")
-    if results:
-        for i, r in enumerate(results, 1):
-            score = r.get("_score", 0.0)
-            text = r.get("text", r.get("chunk_text", "(no text)"))
-            ts_start = r.get("timestamp_start", 0)
-            ts_end = r.get("timestamp_end", 0)
-            print(f"\n  [{i}] score={score:.4f}  {ts_start}ms → {ts_end}ms")
-            print(f"       {text}")
-    else:
-        print("  (No results — no speech was recorded during the 30s window)")
+    for i, r in enumerate(results, 1):
+        score = r.get("_score", 0.0)
+        text = r.get("text", r.get("chunk_text", "(no text)"))
+        ts_start = r.get("timestamp_start", 0)
+        ts_end = r.get("timestamp_end", 0)
+        print(f"\n  [{i}] score={score:.4f}  {ts_start}ms → {ts_end}ms")
+        print(f"       {text}")
 
-    # --- Persistence validation ---
     print("\n📁 Checking persistence …")
-    from jarvis.infra.config_manager import config as cfg
-    index_path_str: str = cfg.get("storage", {}).get("vector_store_path", "data/faiss_index.bin")
     from pathlib import Path
+    index_path_str: str = config.get("storage", {}).get("vector_store_path", "data/faiss_index.bin")
     index_path = Path(index_path_str)
     meta_path = index_path.with_suffix(".pkl")
-
-    index_ok = index_path.exists()
-    meta_ok = meta_path.exists()
-    print(f"   FAISS index  ({index_path}): {'✅ EXISTS' if index_ok else '❌ MISSING'}")
-    print(f"   Metadata pkl ({meta_path}): {'✅ EXISTS' if meta_ok else '❌ MISSING'}")
-
-    if index_ok and meta_ok:
-        print("\n✅ Persistence validated — restart Python and run test_memory_pipeline()")
-        print("   without speaking to confirm old chunks are still searchable.")
-    else:
-        print("\n⚠️  Persistence check FAILED — files not written correctly.")
-
+    print(f"   FAISS index  ({index_path}): {'✅ EXISTS' if index_path.exists() else '❌ MISSING'}")
+    print(f"   Metadata pkl ({meta_path}): {'✅ EXISTS' if meta_path.exists() else '❌ MISSING'}")
     print("\n🛑 Memory pipeline test complete.\n")
+
+
+# ---------------------------------------------------------------------------
+# Query pipeline test — uses existing FAISS index, no capture required
+# ---------------------------------------------------------------------------
+
+def test_query_pipeline() -> None:
+    """Test the full query path against the existing persisted FAISS index.
+
+    No microphone or audio capture needed — loads the FAISS index from disk
+    and runs three hardcoded queries through the full pipeline.
+    """
+    print("\n" + "=" * 60)
+    print("🔍  Jarvis Query Pipeline Test")
+    print("=" * 60 + "\n")
+
+    # Build shared components (no audio hardware)
+    embedding = BGEEmbeddingEngine()
+    vector_store = FAISSVectorStore()
+    buffer = LiquidBuffer()  # empty — no live capture
+
+    parser = QueryParser()
+    retriever = Retriever(
+        embedding_engine=embedding,
+        liquid_buffer=buffer,
+        vector_store=vector_store,
+    )
+    ctx_builder = ContextBuilder()
+
+    print(f"📦 FAISS index loaded: {vector_store._index.ntotal} vectors\n")
+
+    # --- Three hardcoded test queries ---
+    test_queries = [
+        "what did I say about developers and recruiters?",
+        "what was I talking about most recently?",
+        "summarise everything I said today",
+    ]
+
+    for i, query in enumerate(test_queries, 1):
+        print(f"\n{'─' * 55}")
+        print(f"Query {i}: {query}")
+        print(f"{'─' * 55}")
+
+        # 1. Parse
+        parsed = parser.parse(query)
+        print(f"  Intent     : {parsed['intent']}")
+        tf = parsed["time_filter"]
+        print(f"  Time filter: after={tf.get('after_ms')} before={tf.get('before_ms')}")
+        print(f"  Keywords   : {parsed['keywords']}")
+
+        # 2. Retrieve
+        chunks = retriever.retrieve(query_text=query, filters=parsed["time_filter"] or {}, top_k=5)
+        print(f"  Chunks retrieved: {len(chunks)}")
+        for j, c in enumerate(chunks, 1):
+            score = c.get("similarity_score", 0.0)
+            text_preview = (c.get("text") or c.get("chunk_text", ""))[:80]
+            print(f"    [{j}] score={score:.4f}: {text_preview}")
+
+        # 3. Build prompt
+        prompt = ctx_builder.build(chunks, query)
+
+        # 4. Generate via llm_engine router (Claude → Llama → fallback)
+        print(f"\n  🤖 Calling LLM …")
+        llm_res = llm_engine.generate(prompt)
+
+        print(f"\n  ✅ Answer:")
+        print(f"  {llm_res['answer']}\n")
+
+    print("=" * 60)
+    print("🛑 Query pipeline test complete.\n")
+
+    # --- Fallback test instructions ---
+    print("💡 To test Llama fallback:")
+    print("   1. Set `claude_api_key: invalid_key` in jarvis/config/config.yaml")
+    print("   2. Ensure Ollama is running: `ollama serve`")
+    print("   3. Re-run: python main.py test_query")
+    print("   4. Claude will fail → Llama 3.2:1b activates automatically\n")
 
 
 # ---------------------------------------------------------------------------
@@ -429,6 +450,8 @@ if __name__ == "__main__":
             print(results)
         elif arg == "test_memory":
             test_memory_pipeline()
+        elif arg == "test_query":
+            test_query_pipeline()
         else:
             run_smoke_test()
     else:
