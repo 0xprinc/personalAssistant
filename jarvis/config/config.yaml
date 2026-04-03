@@ -21,7 +21,7 @@ parameters:
   pii_redaction: false                        # If true, redact phone numbers, emails, and credit-card numbers
 
 keys:
-  openrouter_api_key: "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"            # OpenRouter API key (https://openrouter.ai)
+  openrouter_api_key: ""            # OpenRouter API key (https://openrouter.ai)
 
 llm:
   provider: "openrouter"                      # Cloud-only mode
@@ -35,3 +35,7 @@ hardware:
 
 storage:
   vector_store_path: "data/faiss_index.bin"  # Local disk path for persisted FAISS vector index
+
+tts:
+  voice: "af_bella"      # Kokoro voice ID (af_bella = American female, warm)
+  lang_code: "a"         # Language code: "a" = American English
