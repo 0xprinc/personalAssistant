@@ -1,23 +1,29 @@
-"""Claude LLM — real implementation using the Anthropic Python SDK.
+"""OpenRouter LLM — moonshotai/kimi-k2.5 via OpenRouter.
 
-Model: claude-sonnet-4-6
-API key: config.yaml keys.claude_api_key or env var ANTHROPIC_API_KEY.
-On any API error, raises so llm_engine.py can fall back to Llama.
+OpenRouter exposes an OpenAI-compatible API — we use the openai SDK with a
+custom base_url. No Anthropic dependency required.
+
+API key: config.yaml keys.openrouter_api_key or env var OPENROUTER_API_KEY.
+On any API error, raises so llm_engine.py can catch and surface gracefully.
 """
 import os
 import re
 
-import anthropic
+from openai import OpenAI, APIConnectionError, RateLimitError, AuthenticationError
 
 from jarvis.interfaces.llm import LLMEngineABC, LLMResponse
 from jarvis.infra.config_manager import config
 from jarvis.infra.logger import Logger
 
+_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+_MODEL = "moonshotai/kimi-k2.5"
+_MAX_TOKENS = 4096   # 1024 was too small — kimi-k2.5 can truncate long summarise answers
+
 
 def _get_api_key() -> str:
-    key: str = config.get("keys", {}).get("claude_api_key", "")
-    if not key or key.startswith("sk-ant-xxx"):
-        key = os.environ.get("ANTHROPIC_API_KEY", "")
+    key: str = config.get("keys", {}).get("openrouter_api_key", "")
+    if not key or key.startswith("sk-or-xxx"):
+        key = os.environ.get("OPENROUTER_API_KEY", "")
     return key
 
 
@@ -29,7 +35,6 @@ def _extract_source_chunks(prompt: str) -> list[str]:
     lines = m.group(1).strip().split("\n")
     chunks = []
     for line in lines:
-        # Strip leading "[N] timestamp — " prefix
         text = re.sub(r"^\[\d+\] .+? — ", "", line).strip()
         if text:
             chunks.append(text)
@@ -37,45 +42,44 @@ def _extract_source_chunks(prompt: str) -> list[str]:
 
 
 class ClaudeLLM(LLMEngineABC):
-    """Claude API LLM engine (primary)."""
+    """OpenRouter LLM engine using moonshotai/kimi-k2.5.
 
-    MODEL = "claude-sonnet-4-5"
-    MAX_TOKENS = 1024
+    Class kept as ClaudeLLM for interface compatibility — internally uses
+    OpenRouter, not Anthropic.
+    """
 
     def generate(self, prompt: str) -> LLMResponse:
         api_key = _get_api_key()
         if not api_key:
             raise RuntimeError(
-                "No Claude API key found. Set keys.claude_api_key in config.yaml "
-                "or the ANTHROPIC_API_KEY environment variable."
+                "No OpenRouter API key found. Set keys.openrouter_api_key in "
+                "config.yaml or the OPENROUTER_API_KEY environment variable."
             )
 
-        client = anthropic.Anthropic(api_key=api_key)
+        client = OpenAI(api_key=api_key, base_url=_OPENROUTER_BASE_URL)
 
-        Logger.log("INFO", "llm_claude", f"Calling Claude API (model={self.MODEL}) …")
+        Logger.log("INFO", "llm_openrouter", f"Calling OpenRouter — model={_MODEL} …")
         try:
-            message = client.messages.create(
-                model=self.MODEL,
-                max_tokens=self.MAX_TOKENS,
+            response = client.chat.completions.create(
+                model=_MODEL,
+                max_tokens=_MAX_TOKENS,
                 messages=[{"role": "user", "content": prompt}],
             )
-            answer: str = message.content[0].text
+            answer: str = response.choices[0].message.content or ""
             source_chunks = _extract_source_chunks(prompt)
+            usage = response.usage
             Logger.log(
-                "INFO", "llm_claude",
-                f"Claude response received ({len(answer)} chars, "
-                f"{message.usage.input_tokens} in / {message.usage.output_tokens} out tokens)"
+                "INFO", "llm_openrouter",
+                f"Response received ({len(answer)} chars, "
+                f"{usage.prompt_tokens if usage else '?'} in / "
+                f"{usage.completion_tokens if usage else '?'} out tokens)"
             )
             return {"answer": answer, "source_chunks": source_chunks}
 
-        except (anthropic.APIConnectionError, anthropic.RateLimitError) as exc:
-            Logger.log("ERROR", "llm_claude", f"Claude API error: {exc}")
-            raise  # re-raise so llm_engine can catch and fall back
-
-        except anthropic.AuthenticationError as exc:
-            Logger.log("ERROR", "llm_claude", f"Claude authentication error: {exc}")
+        except (APIConnectionError, RateLimitError, AuthenticationError) as exc:
+            Logger.log("ERROR", "llm_openrouter", f"OpenRouter API error: {exc}")
             raise
 
         except Exception as exc:
-            Logger.log("ERROR", "llm_claude", f"Unexpected Claude error: {exc}")
+            Logger.log("ERROR", "llm_openrouter", f"Unexpected error: {exc}")
             raise

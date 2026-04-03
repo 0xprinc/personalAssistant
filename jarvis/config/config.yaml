@@ -21,7 +21,14 @@ parameters:
   pii_redaction: false                        # If true, redact phone numbers, emails, and credit-card numbers
 
 keys:
-  claude_api_key: "sk-ant-xxx"               # Anthropic Claude API key for cloud LLM Engine
+  openrouter_api_key: "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"            # OpenRouter API key (https://openrouter.ai)
+
+llm:
+  provider: "openrouter"                      # Cloud-only mode
+  model: "moonshotai/kimi-k2.5"              # Model used via OpenRouter
+  base_url: "https://openrouter.ai/api/v1"   # OpenRouter OpenAI-compatible endpoint
+  max_tokens: 4096                            # Max tokens in LLM response
+
 
 hardware:
   device_selection: "laptop"                  # Preferred mic source: "laptop" or "phone"

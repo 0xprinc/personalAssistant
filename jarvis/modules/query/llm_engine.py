@@ -1,65 +1,37 @@
-"""LLM Engine Router — selects Claude vs Llama automatically.
+"""LLM Engine Router — cloud-only via OpenRouter.
 
-This is the ONLY file that imports llm_claude and llm_llama.
-Everything else imports only this module.
+Uses moonshotai/kimi-k2.5 via OpenRouter.
+On API failure, returns a hardcoded error response (no local fallback).
 
-Fallback chain:
-  1. Try Claude API
-  2. On APIConnectionError / RateLimitError / AuthenticationError / any network error
-     → log warning + try Llama via Ollama
-  3. If Llama also fails → return hardcoded "no LLM available" response
+This is the ONLY file that external code should import for LLM generation.
 """
-import anthropic
+from openai import APIConnectionError, RateLimitError, AuthenticationError
 
 from jarvis.infra.logger import Logger
 from jarvis.interfaces.llm import LLMResponse
-from jarvis.modules.query.llm_claude import ClaudeLLM
-from jarvis.modules.query.llm_llama import LlamaLLM
+from jarvis.modules.query.llm_claude import ClaudeLLM   # OpenRouter implementation
 
-_claude = ClaudeLLM()
-_llama: LlamaLLM | None = None   # lazy-init — avoid loading Ollama at startup
-
-
-def _get_llama() -> LlamaLLM:
-    global _llama
-    if _llama is None:
-        _llama = LlamaLLM()
-    return _llama
+_openrouter = ClaudeLLM()
 
 
 def generate(prompt: str) -> LLMResponse:
-    """Generate a response, routing Claude → Llama → hardcoded fallback."""
-    # --- Try Claude ---
-    try:
-        return _claude.generate(prompt)
-    except (
-        anthropic.APIConnectionError,
-        anthropic.RateLimitError,
-        anthropic.AuthenticationError,
-        RuntimeError,
-    ) as exc:
-        Logger.log(
-            "WARNING", "llm_engine",
-            f"Claude API unavailable ({type(exc).__name__}: {exc}), "
-            "falling back to Llama …"
-        )
-    except Exception as exc:
-        Logger.log(
-            "WARNING", "llm_engine",
-            f"Claude unexpected error ({exc}), falling back to Llama …"
-        )
+    """Generate a response via OpenRouter (moonshotai/kimi-k2.5).
 
-    # --- Try Llama ---
+    On any API/connection error, logs the failure and returns a graceful
+    hardcoded response — no local model fallback (cloud-only mode).
+    """
     try:
-        return _get_llama().generate(prompt)
-    except Exception as exc:
+        return _openrouter.generate(prompt)
+    except (APIConnectionError, RateLimitError, AuthenticationError, RuntimeError) as exc:
         Logger.log(
             "ERROR", "llm_engine",
-            f"Llama also failed ({exc}). Returning degraded response."
+            f"OpenRouter unavailable ({type(exc).__name__}: {exc}). "
+            "Returning degraded response."
         )
+    except Exception as exc:
+        Logger.log("ERROR", "llm_engine", f"Unexpected LLM error: {exc}. Returning degraded response.")
 
-    # --- Hardcoded fallback ---
     return {
-        "answer": "I could not reach any LLM. Please check your connection.",
+        "answer": "I could not reach the LLM. Please check your OpenRouter API key and connection.",
         "source_chunks": [],
     }
