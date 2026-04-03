@@ -233,7 +233,7 @@ def test_stt_pipeline() -> list[str]:
     t = threading.Thread(target=_processing_loop, daemon=True)
     t.start()
 
-    time.sleep(20)
+    time.sleep(2000)
 
     test_running[0] = False
     try:
