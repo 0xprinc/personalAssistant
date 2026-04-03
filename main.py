@@ -140,43 +140,47 @@ def run_smoke_test() -> None:
 # ---------------------------------------------------------------------------
 
 def test_audio_pipeline() -> None:
-    """10-second live mic test: AudioCapture → VAD → print SpeechSegments."""
-    Logger.log("INFO", "main", "=== Starting Audio Pipeline Integration Test ===")
+    """10-second live mic test: Clean VAD output."""
+    # Suppress JSON logs for this clean test
+    Logger.log = lambda *args, **kwargs: None
 
     device_mgr = DevicePriorityManager()
     source = device_mgr.get_active_source()
-    audio_cap = AudioCapture(device_id=source["device_id"])
+    print(f"🎤 Using Microphone: {source['device_name']} (Native: {source['sample_rate']}Hz)\n")
+
+    audio_cap = AudioCapture(device_id=source["device_id"], native_rate=source["sample_rate"])
     vad = VadEngine(audio_queue=audio_cap.audio_queue)
 
+    print("🟢 Pipeline Ready. Please speak!\n")
     audio_cap.start()
 
     test_running = [True]
 
-    def _consume_segments():
+    def _monitor_vad():
+        was_speaking = False
         while test_running[0]:
             try:
-                seg = vad.segment_queue.get(timeout=1.0)
-                # len(pcm_data) / 2  = number of int16 samples (2 bytes each)
+                # Segment was emitted (speech ended)
+                seg = vad.segment_queue.get(timeout=0.05)
                 n_samples = len(seg["pcm_data"]) / 2
                 duration_ms = n_samples / 16000 * 1000
-                block_count = n_samples / 512
-                print(
-                    f"SpeechSegment — start_ms={seg['start_ms']} "
-                    f"duration_ms={duration_ms:.1f}  blocks={block_count:.1f}"
-                )
+                print(f"⏹️  [VAD] Speech ended! Captured {duration_ms:.0f}ms of audio.\n")
+                was_speaking = False
             except queue.Empty:
-                pass
+                # Poll is_speaking state to show when speech starts
+                if vad.is_speaking and not was_speaking:
+                    print("🗣️  [VAD] Detecting speech... listening...", flush=True)
+                    was_speaking = True
 
-    t = threading.Thread(target=_consume_segments, daemon=True)
+    t = threading.Thread(target=_monitor_vad, daemon=True)
     t.start()
 
-    Logger.log("INFO", "main", "Listening for 10 seconds… please speak into the mic!")
-    time.sleep(10)
+    time.sleep(15)
 
     test_running[0] = False
     vad.stop()
     audio_cap.stop()
-    Logger.log("INFO", "main", "Audio pipeline test stopped cleanly.")
+    print("🛑 Test complete.")
 
 
 # ---------------------------------------------------------------------------
@@ -184,51 +188,46 @@ def test_audio_pipeline() -> None:
 # ---------------------------------------------------------------------------
 
 def test_stt_pipeline() -> None:
-    """20-second live mic test: full capture → transcription → chunked output."""
-    Logger.log("INFO", "main", "=== Starting STT Pipeline Integration Test ===")
+    """20-second live mic test: Clean STT transcription output."""
+    # Suppress JSON logs for this clean test
+    Logger.log = lambda *args, **kwargs: None
 
     device_mgr = DevicePriorityManager()
     source = device_mgr.get_active_source()
-    audio_cap = AudioCapture(device_id=source["device_id"])
+    print(f"🎤 Using Microphone: {source['device_name']} (Native: {source['sample_rate']}Hz)\n")
+
+    audio_cap = AudioCapture(device_id=source["device_id"], native_rate=source["sample_rate"])
     vad = VadEngine(audio_queue=audio_cap.audio_queue)
     stt = MoonshineSTT()
     cleaner = TextCleaner()
-    chunker = Chunker()
 
+    print("🟢 Pipeline Ready. Please speak!\n")
     audio_cap.start()
 
     test_running = [True]
 
     def _processing_loop():
-        Logger.log("INFO", "main", "STT processing pipeline thread started")
+        was_speaking = False
         while test_running[0]:
             try:
-                segment = vad.segment_queue.get(timeout=1.0)
-            except queue.Empty:
-                continue
-
-            try:
+                segment = vad.segment_queue.get(timeout=0.05)
+                # Segment obtained, speech ended
+                print("⏳ Transcribing...")
                 transcript = stt.transcribe(segment)
                 clean_text = cleaner.clean(transcript["text"])
-                if not clean_text:
-                    continue
-
-                chunks = chunker.split(clean_text, transcript["start_ms"], transcript["end_ms"])
-                for chunk in chunks:
-                    words = len(chunk["chunk_text"].split())
-                    print(
-                        f"Chunk: '{chunk['chunk_text']}' | "
-                        f"words={words} | "
-                        f"start={chunk['timestamp_start']} | "
-                        f"end={chunk['timestamp_end']}"
-                    )
-            except Exception as exc:
-                Logger.log("ERROR", "main", f"Processing pipeline error: {exc}")
+                if clean_text:
+                    print(f"\n📝 [Transcript]: {clean_text}\n")
+                else:
+                    print("❌ [Transcript]: (Empty or unintelligible)\n")
+                was_speaking = False
+            except queue.Empty:
+                if vad.is_speaking and not was_speaking:
+                    print("🗣️  [VAD] Detecting speech... listening...", flush=True)
+                    was_speaking = True
 
     t = threading.Thread(target=_processing_loop, daemon=True)
     t.start()
 
-    Logger.log("INFO", "main", "Listening for 20 seconds… please speak into the mic!")
     time.sleep(20)
 
     test_running[0] = False
@@ -237,8 +236,7 @@ def test_stt_pipeline() -> None:
         audio_cap.stop()
     except Exception:
         pass
-    Logger.log("INFO", "main", "STT pipeline test stopped cleanly.")
-
+    print("🛑 Test complete.")
 
 # ---------------------------------------------------------------------------
 # Entrypoint

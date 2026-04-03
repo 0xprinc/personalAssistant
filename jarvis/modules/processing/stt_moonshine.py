@@ -16,6 +16,10 @@ Output: TranscriptResult {text, start_ms, end_ms, confidence}
 
 import sys
 import time
+import os
+
+# Suppress Hugging Face symlinks warnings for perfectly clean terminal output
+os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
 from typing import Optional
 
 import numpy as np
@@ -23,8 +27,8 @@ import numpy as np
 from jarvis.infra.logger import Logger
 from jarvis.interfaces.stt import STTEngineABC, TranscriptResult
 
-# HuggingFace model identifier for Moonshine Tiny
-HF_MODEL_ID = "UsefulSensors/moonshine-tiny"
+# HuggingFace model identifier for Moonshine Base
+HF_MODEL_ID = "UsefulSensors/moonshine-base"
 SAMPLE_RATE = 16000
 MAX_SECONDS = 30
 
@@ -67,7 +71,7 @@ class MoonshineSTT(STTEngineABC):
 
             Logger.log(
                 "INFO", "stt_moonshine",
-                f"Loading Moonshine Tiny from HuggingFace ({HF_MODEL_ID}) "
+                f"Loading Moonshine Base from HuggingFace ({HF_MODEL_ID}) "
                 f"on device={self._device} …"
             )
             self._processor = AutoProcessor.from_pretrained(HF_MODEL_ID)
@@ -78,7 +82,7 @@ class MoonshineSTT(STTEngineABC):
             self._backend = "transformers"
             Logger.log(
                 "INFO", "stt_moonshine",
-                f"Moonshine Tiny loaded via HuggingFace Transformers "
+                f"Moonshine Base loaded via HuggingFace Transformers "
                 f"(device={self._device})"
             )
             return
@@ -219,6 +223,7 @@ class MoonshineSTT(STTEngineABC):
                 input_values,
                 attention_mask=attention_mask,
                 max_new_tokens=448,
+                max_length=None,
             )
 
         transcription = self._processor.batch_decode(
