@@ -1,0 +1,27 @@
+# jarvis/config/config.yaml — Single source of truth for all settings
+
+models:
+  stt_path: "UsefulSensors/moonshine-tiny"   # HuggingFace model ID for Moonshine Tiny STT (cached after first download)
+  embedding_path: "models/bge-small-en-v1.5" # Path to the BGE-small embedding model
+  llm_fallback_path: "models/llama-3.2-1b"   # Path to offline fallback Llama LLM
+  tts_path: "models/kokoro-82m"              # Path to Kokoro 82M TTS model
+  vad_model_path: "models/silero_vad.onnx"   # Path to Silero VAD ONNX model (relative to project root)
+
+parameters:
+  chunk_size_words: 50                        # Approximate target number of words per memory chunk
+  liquid_buffer_duration_minutes: 10          # Minutes of recent audio to keep in RAM buffer
+  vad_threshold: 0.5                          # Float 0-1: minimum VAD confidence to classify a block as speech
+  embedding_dimensions: 384                   # Dimension of BGE-small output vectors
+  tts_idle_timeout_seconds: 30               # Seconds of inactivity before Kokoro is unloaded from RAM
+  sample_rate: 16000                          # Audio capture sample rate in Hz (must match VAD training)
+  block_size: 512                             # Samples per audio block (~32 ms at 16kHz)
+  pii_redaction: false                        # If true, redact phone numbers, emails, and credit-card numbers
+
+keys:
+  claude_api_key: "sk-ant-xxx"               # Anthropic Claude API key for cloud LLM Engine
+
+hardware:
+  device_selection: "laptop"                  # Preferred mic source: "laptop" or "phone"
+
+storage:
+  vector_store_path: "data/faiss_index.bin"  # Local disk path for persisted FAISS vector index
