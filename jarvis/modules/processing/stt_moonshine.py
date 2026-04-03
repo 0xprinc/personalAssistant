@@ -36,7 +36,7 @@ MAX_SECONDS = 30
 class MoonshineSTT(STTEngineABC):
     """Moonshine STT engine using HuggingFace Transformers.
 
-    Loads from UsefulSensors/moonshine-tiny on first init (cached to
+    Loads from UsefulSensors/moonshine-base on first init (cached to
     ~/.cache/huggingface after download). Falls back gracefully if a
     package is missing and exits with clear instructions if nothing works.
     """

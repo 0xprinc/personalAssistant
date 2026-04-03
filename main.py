@@ -187,8 +187,11 @@ def test_audio_pipeline() -> None:
 # Full STT pipeline test — AudioCapture → VAD → STT → TextCleaner → Chunker
 # ---------------------------------------------------------------------------
 
-def test_stt_pipeline() -> None:
-    """20-second live mic test: Clean STT transcription output."""
+def test_stt_pipeline() -> list[str]:
+    """20-second live mic test: Clean STT transcription output.
+    Returns:
+        List of all clean transcribed strings detected during the 20 seconds.
+    """
     # Suppress JSON logs for this clean test
     Logger.log = lambda *args, **kwargs: None
 
@@ -205,6 +208,7 @@ def test_stt_pipeline() -> None:
     audio_cap.start()
 
     test_running = [True]
+    collected_transcripts = []
 
     def _processing_loop():
         was_speaking = False
@@ -217,6 +221,7 @@ def test_stt_pipeline() -> None:
                 clean_text = cleaner.clean(transcript["text"])
                 if clean_text:
                     print(f"\n📝 [Transcript]: {clean_text}\n")
+                    collected_transcripts.append(clean_text)
                 else:
                     print("❌ [Transcript]: (Empty or unintelligible)\n")
                 was_speaking = False
@@ -237,6 +242,7 @@ def test_stt_pipeline() -> None:
     except Exception:
         pass
     print("🛑 Test complete.")
+    return collected_transcripts
 
 # ---------------------------------------------------------------------------
 # Entrypoint
@@ -248,7 +254,9 @@ if __name__ == "__main__":
         if arg == "test":
             test_audio_pipeline()
         elif arg == "test_stt":
-            test_stt_pipeline()
+            results = test_stt_pipeline()
+            print("\n--- FINAL OUTPUT ---")
+            print(results)
         else:
             run_smoke_test()
     else:
